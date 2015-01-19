@@ -124,7 +124,7 @@ class HFOptimizer:
             for inputs in self.cg_dataset.iterate(update=False):
                 M += self.list_to_flat(self.f_gc(*inputs)[:len(self.p)]) ** 2  # / self.cg_dataset.number_batches**2
             # print 'precond~%.3f,' % (M - self.lambda_).mean(),
-            M **= -0.75  # actually 1/M
+            M **= -self.xi
             sys.stdout.flush()
         else:
             M = 1.0
@@ -165,17 +165,24 @@ class HFOptimizer:
             k = max(10, i / 10)
             if i > k and phi_i < 0 and (phi_i - phi[-k - 1]) / phi_i < k * 0.0005:
                 break
+            if np.isnan(backtracking[-1][0]):  # stop if nan encountered
+                break
 
         self.cg_last_x = x.copy()
 
         if self.cg_backtracking:
-            j = np.argmin([b[0] for b in backtracking])
+            try:
+                # try to pick last non-nan (if 0 is nan, that will be taken
+                # care of in the .train iteration part):
+                j = np.nanargmin([b[0] for b in backtracking])
+            except ValueError:
+                j = 0
         else:
             j = len(backtracking) - 1
             while j > 0 and backtracking[j - 1][0] < backtracking[j][0]:
                 j -= 1
         if not self.graphical_out:
-            print('Backtracked {}/{}'.format(backtracking[j][2], i))
+            print('Backtracked to {}/{}'.format(backtracking[j][2], i))
             sys.stdout.flush()
 
         return backtracking[j] + (i,)
@@ -190,7 +197,8 @@ class HFOptimizer:
 
     def batch_Gv(self, vector, lambda_=None):
         v = self.flat_to_list(vector)
-        if lambda_ is None: lambda_ = self.lambda_
+        if lambda_ is None:
+            lambda_ = self.lambda_
         result = lambda_ * vector  # Tikhonov damping
         for inputs in self.cg_dataset.iterate(False):
             result += self.list_to_flat(
@@ -198,7 +206,8 @@ class HFOptimizer:
         return result
 
     def train(self, gradient_dataset, cg_dataset, initial_lambda=0.1, mu=0.03, cg_backtracking=False,
-              preconditioner=False, max_cg_iterations=250, num_updates=100, validation=None, validation_frequency=1,
+              preconditioner=True, preconditioner_xi=.75,
+              max_cg_iterations=250, num_updates=100, validation=None, validation_frequency=1,
               patience=np.inf, save_progress=None, print_parameters=False,
               graphical_out=False, display_range=100):
         """Performs HF training.
@@ -220,6 +229,8 @@ class HFOptimizer:
             all CG iterates. Else, Martens' heuristic is used.
         preconditioner : Boolean
             Whether to use Martens' preconditioner.
+            P = (diag(d) + lambda * I)**xi
+        preconditioner_xi : 0 < float < 1
         max_cg_iterations : int
             CG stops after this many iterations regardless of the stopping criterion.
         num_updates : int
@@ -260,6 +271,7 @@ class HFOptimizer:
         best = [0, np.inf, None]  # iteration, cost, params
         first_iteration = 1
         previous_parameters = None
+        self.xi = preconditioner_xi
 
         if isinstance(save_progress, str) and os.path.isfile(save_progress):
             save = cPickle.load(file(save_progress))
@@ -275,7 +287,8 @@ class HFOptimizer:
             axarr[0].set_title('Parameter updates')
             axdata = np.empty(axarr.shape, dtype=object)
 
-        try:#TODO: Stopping criterion, max pct change in values < tolerance
+        try:
+        #TODO: Stopping criterion, max pct change in values < tolerance
             counter_good_values = 0
             for u in xrange(first_iteration, 1 + num_updates):
 
@@ -292,13 +305,18 @@ class HFOptimizer:
                     print('Cost= %.7f,' % (np.mean(costs, axis=0)), end='')
                     print(' lambda={0:.3f}'.format(self.lambda_), end='')
                     sys.stdout.flush()
-                elif not self.graphical_out:
+                else:
                     print('Update %i/%i:' % (u, num_updates), end=' ')
                     print('Cost= %.7f,' % (np.mean(costs, axis=0)), end='')
                     print(' lambda={0:.3f}'.format(self.lambda_))
                     sys.stdout.flush()
 
                 after_cost, flat_delta, backtracking, num_cg_iterations = self.cg(-gradient)
+                if np.isnan(after_cost):
+                    print('Cost function not real valued. Adjusting lambda and trying again.')
+                    self.lambda_ *= 10.
+                    continue
+
                 delta_cost = np.dot(flat_delta, gradient + 0.5 *
                                     self.batch_Gv(flat_delta, lambda_=0))  # disable damping
                 before_cost = self.quick_cost()
