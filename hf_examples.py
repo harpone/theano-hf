@@ -64,7 +64,9 @@ def simple_NN(sizes=(784, 100, 10)):
 
   for i in xrange(len(sizes)-1):
     a, b = sizes[i:i+2]
-    Wi = theano.shared((10./numpy.sqrt(a+b) * numpy.random.uniform(-1, 1, size=(a, b))).astype(theano.config.floatX))
+    Wi = theano.shared((10./numpy.sqrt(a+b) *
+                        numpy.random.uniform(-1, 1, size=(a, b)))
+                       .astype(theano.config.floatX))
     bi = theano.shared(numpy.zeros(b, dtype=theano.config.floatX))
     p += [Wi, bi]
 
@@ -97,7 +99,9 @@ def example_NN(hf=True):
   valid_dataset = SequenceDataset(valid, batch_size=None, number_batches=5000)
   
   if hf:
-    hf_optimizer(p, inputs, s, costs).train(gradient_dataset, cg_dataset, initial_lambda=1.0, preconditioner=True, validation=valid_dataset)
+    hf_optimizer(p, inputs, s, costs).train(gradient_dataset, cg_dataset,
+                                            initial_lambda=1.0, preconditioner=True,
+                                            validation=valid_dataset)
   else:
     sgd_optimizer(p, inputs, costs, gradient_dataset, lr=1e-3)
     
