@@ -3,6 +3,7 @@
 
 from __future__ import print_function, division
 import numpy as np
+import pandas as pd
 import sys
 import theano
 import theano.tensor as T
@@ -60,7 +61,7 @@ class HFOptimizer:
 
         self.p = p
         self.shapes = [i.get_value().shape for i in p]
-        self.sizes = map(np.prod, self.shapes)
+        self.sizes = [i.get_value().size for i in p]
         self.positions = np.cumsum([0] + self.sizes)[:-1]
         self.total_size = np.sum(np.array(self.sizes))
         self.mu = None
@@ -162,7 +163,7 @@ class HFOptimizer:
             #sys.stdout.flush()
             #backspaces = len(progress)
 
-            k = max(10, i / 10)
+            k = max(3, i / 10)
             if i > k and phi_i < 0 and (phi_i - phi[-k - 1]) / phi_i < k * 0.0005:
                 break
             if np.isnan(backtracking[-1][0]):  # stop if nan encountered
@@ -209,7 +210,7 @@ class HFOptimizer:
               preconditioner=True, preconditioner_xi=.75,
               max_cg_iterations=250, num_updates=100, validation=None, validation_frequency=1,
               patience=np.inf, save_progress=None, print_parameters=False,
-              graphical_out=False, display_range=100):
+              graphical_out=False, display_range=100, write_to_file=False):
         """Performs HF training.
 
         gradient_dataset : SequenceDataset-like object
@@ -253,6 +254,8 @@ class HFOptimizer:
         print_variables: Boolean
             Whether or not print out the variables after each iteration. Default
             is False (keep it that way for big problems!)
+        write_to_file: Boolean
+            If True, writes the cost_values and parameters to file.
         """
 
         self.lambda_ = initial_lambda
@@ -272,7 +275,13 @@ class HFOptimizer:
         first_iteration = 1
         previous_parameters = None
         self.xi = preconditioner_xi
-
+        columns = [x.name + str(i) for x in self.p for i in
+                   xrange(x.get_value().size)]
+        self.costs_df = pd.DataFrame(index=range(num_updates), columns=['Cost'])
+        self.best_cost = np.nan
+        self.parameters_df = pd.DataFrame(index=range(num_updates), columns=columns)
+        self.parameters_df.ix[0] = np.hstack([i.get_value().copy().flatten()
+                                          for i in self.p])
         if isinstance(save_progress, str) and os.path.isfile(save_progress):
             save = cPickle.load(file(save_progress))
             self.cg_last_x, best, self.lambda_, first_iteration, init_p = save
@@ -290,8 +299,8 @@ class HFOptimizer:
         try:
         #TODO: Stopping criterion, max pct change in values < tolerance
             counter_good_values = 0
+            counter_cost_nans = 0
             for u in xrange(first_iteration, 1 + num_updates):
-
                 gradient = np.zeros(sum(self.sizes), dtype=theano.config.floatX)
                 costs = []
                 for inputs in gradient_dataset.iterate(update=True):
@@ -312,27 +321,45 @@ class HFOptimizer:
                     sys.stdout.flush()
 
                 after_cost, flat_delta, backtracking, num_cg_iterations = self.cg(-gradient)
+                # add first good cost to self.first_cost:
+                if counter_good_values == 0:
+                    self.first_cost = after_cost
+                # Check if cost is nan; retry with higher lambda if true
                 if np.isnan(after_cost):
                     print('Cost function not real valued. Adjusting lambda and trying again.')
-                    self.lambda_ *= 10.
+                    self.lambda_ *= 5.
+                    counter_cost_nans += 1
                     continue
+                # Check if cost is larger than initial cost; retry with higher lambda if true
+                if after_cost > self.first_cost:
+                    print('Cost function too high. Adjusting lambda and trying again.')
+                    self.lambda_ *= 5.
+                    continue
+
+                self.costs_df.ix[u] = after_cost
 
                 delta_cost = np.dot(flat_delta, gradient + 0.5 *
                                     self.batch_Gv(flat_delta, lambda_=0))  # disable damping
                 before_cost = self.quick_cost()
                 for i, delta in zip(self.p, self.flat_to_list(flat_delta)):
                     i.set_value(i.get_value() + delta)
+
                 # temp print for low dim cases:
                 if print_parameters:
                     print('Values (A, B, b): \n', [i.get_value().copy() for i in self.p])
                 cg_dataset.update()
 
-                rho = (after_cost - before_cost) / delta_cost  # Levenberg-Marquardt
-                # print 'rho=%f' %rho,
+                # Levenberg-Marquardt lambda adjustment
+                # Adjust lambda to decrease much more rapidly the more
+                # nan values encountered in cost function:
+                rho = (after_cost - before_cost) / delta_cost
                 if rho < 0.25:
                     self.lambda_ *= 1.5
                 elif rho > 0.75:
-                    self.lambda_ /= 1.5
+                    self.lambda_ *= .66 * (5. / 2) ** (-counter_cost_nans)
+                if counter_cost_nans > 0:
+                    counter_cost_nans -= 1
+                assert counter_cost_nans >= 0
 
                 if validation is not None and u % validation_frequency == 0:
                     if hasattr(validation, 'iterate'):
@@ -358,6 +385,7 @@ class HFOptimizer:
                                                for i in self.p])
                 current_parameters_flat = np.hstack([i.get_value().copy().flatten()
                                                for i in self.p])
+                self.parameters_df.ix[u] = current_parameters_flat
 
                 if np.prod(~np.isnan(current_parameters_flat)): #  check that no nans in parameters
                     counter_good_values += 1
@@ -367,6 +395,12 @@ class HFOptimizer:
                         self.last_parameters_change = parameters_change
                         self.solutions = previous_parameters  # NOT current because they may be bad
                     previous_parameters = current_parameters
+
+                # dump cost_values and param_values to file:
+                self.costs_df.to_csv('costs.csv', index_label=False)
+                self.parameters_df.to_csv('parameters.csv', index_label=False)
+
+
 
 
 
